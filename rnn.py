@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import pretty_midi
 from typing import Optional, Sequence
 import os
+from pathlib import Path
 
 
 '''
@@ -81,5 +82,43 @@ def note_to_midi(
     return os.path.abspath(file)
 
 
-raw_notes = midi_to_notes(r"C:\Users\erik3\Downloads\Music Generation\data\bleed.mid")
-plot_midi(raw_notes, count = 150)
+# raw_notes = midi_to_notes(r"C:\Users\erik3\Downloads\Music Generation\data\bleed.mid")
+# plot_midi(raw_notes, count = 150)
+
+files = glob.glob(r"C:\Users\erik3\Downloads\Music Generation\data\*")
+all_notes = []
+for file in files:
+    notes = midi_to_notes(file)
+    all_notes.append(notes)
+
+all_notes = pd.concat(all_notes)
+print('number of notes', len(all_notes))
+train = np.stack([all_notes[key] for key in ['pitch', 'step','duration']], axis = 1)
+midi_dataset = tf.data.Dataset.from_tensor_slices(train)
+
+
+def generate(   #supervised, sequence of note = inpute, next note = label
+    dataset: tf.data.Dataset,
+    seq_length: int,
+    vocab_size = 128
+) -> tf.data.Dataset: 
+    seq_length += 1
+    #window slices the whole sequence into smaller sequences
+    windows = dataset.window(seq_length, shift = 1, stride = 1, drop_remainder=True)
+    flatten = lambda x: x.batch(seq_length, drop_remainder = True)
+    sequence = windows.flat_map(flatten)
+
+    def normalize_pitch(x):
+        x = x/[vocab_size, 1.0, 1.0]
+        return x
+    def split_labels(sequence): #takes a sequence of notes
+        inputs = sequence[:-1] #removes the last element, keeps the input
+        labels_dense = sequence[-1] #last element, aka the target
+        labels = {key:labels_dense[i] for i, 
+                  key in enumerate(['pitch','step','duration'])}
+        #creates a dict with pitch, step, and duration values of the target
+        return normalize_pitch(inputs), labels
+    
+    return sequence.map(split_labels, num_parallel_calls=tf.data.AUTOTUNE)
+
+seq = generate(midi_dataset, seq_length = 50, vocab_size=128)
