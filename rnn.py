@@ -81,7 +81,7 @@ def note_to_midi(
     s.write(file)
     return os.path.abspath(file)
 
-
+# plot one song
 # raw_notes = midi_to_notes(r"C:\Users\erik3\Downloads\Music Generation\data\bleed.mid")
 # plot_midi(raw_notes, count = 150)
 
@@ -97,7 +97,7 @@ train = np.stack([all_notes[key] for key in ['pitch', 'step','duration']], axis 
 midi_dataset = tf.data.Dataset.from_tensor_slices(train)
 
 
-def generate(   #supervised, sequence of note = inpute, next note = label
+def sequence_transform(   #supervised, sequence of note = inpute, next note = label
     dataset: tf.data.Dataset,
     seq_length: int,
     vocab_size = 128
@@ -120,5 +120,98 @@ def generate(   #supervised, sequence of note = inpute, next note = label
         return normalize_pitch(inputs), labels
     
     return sequence.map(split_labels, num_parallel_calls=tf.data.AUTOTUNE)
+sequence_length = 50
+seq = sequence_transform(midi_dataset, seq_length = sequence_length, vocab_size=128)
 
-seq = generate(midi_dataset, seq_length = 50, vocab_size=128)
+''' check first data point
+for sequence, target in seq.take(1): 
+    print(sequence.shape)
+    print('first 10 notes', sequence[:10])
+    print('target', target)
+
+'''
+
+batch_size = 64  #number of sequences used to train at a time
+buffer_size = len(all_notes) - sequence_length #size of the pool to select batches from
+train_dataset = (seq.shuffle(buffer_size)
+                 .batch(batch_size, drop_remainder = True)
+                 .cache()
+                 .prefetch(tf.data.experimental.AUTOTUNE))
+
+
+def mse_positive(y_true: tf.Tensor, y_pred: tf.Tensor):
+    mse = (y_true - y_pred) ** 2
+    positive_pressure = 10 * tf.maximum(-y_pred, 0.0) #punishment for negative output
+    return tf.reduce_mean(mse + positive_pressure)
+
+input_shape = (sequence_length, 3)
+learning_rate = 0.01
+
+inputs = tf.keras.Input(input_shape)
+X = tf.keras.layers.LSTM(128)(inputs) #128 neurons
+
+outputs = {
+    'pitch' : tf.keras.layers.Dense(128,  name = 'pitch')(X),
+    'step' : tf.keras.layers.Dense(1, name='step')(X),
+    'duration' : tf.keras.layers.Dense(1, name='duration')(X)
+}
+
+model = tf.keras.Model(inputs, outputs)
+
+loss = {
+    'pitch' : tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+    'step' : mse_positive,
+    'duration' : mse_positive
+}
+
+optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+
+model.compile(loss = loss, loss_weights= {
+    'pitch' : 0.05,
+    'step': 1.0,
+    'duration': 0.5
+    },
+    optimizer= optimizer)
+model.summary()
+losses = model.evaluate(train_dataset, return_dict=True)
+
+callbacks = [tf.keras.callbacks.ModelCheckpoint(
+    filepath = './training_checkpoints/ckpt_{epoch}',
+    save_weights_only=True),
+    tf.keras.callbacks.EarlyStopping(
+        monitor = 'loss',
+        patience = 3,
+        verbose = 1, 
+        restore_best_weights = True)]
+
+epochs = 50
+history = model.fit(
+    train_dataset,
+    epochs = epochs,
+    callbacks = callbacks
+)
+
+# plt.plot(history.epoch, history.history['loss'], label = 'total loss')
+# plt.show()
+
+def predict_next_note(
+        notes: np.ndarray,
+        keras_model: tf.keras.Model,
+        
+) -> int: 
+
+    inputs = tf.expand_dims(notes, 0)
+    predictions = model.predict(inputs)
+    pitch = predictions['pitch']
+    step = predictions['step']
+    duration = predictions['duration']
+    pitch_rand = tf.random.categorical(pitch, num_samples=1)
+    pitch_rand = tf.squeeze(pitch_rand, axis = -1)
+    duration = tf.squeeze(duration, axis = -1)
+    step = tf.squeeze(step, axis = -1)
+
+    step = tf.maximum(0, step)
+    duration = tf.maximum(0,duration)
+
+    return int(pitch_rand), float(step), float(duration)
+
