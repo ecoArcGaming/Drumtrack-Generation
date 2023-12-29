@@ -3,6 +3,8 @@ import numpy as np
 import os 
 from midiutil import MIDIFile
 
+#this file is not used 
+
 class Song:
     def __init__(self, bpm, length) -> None:
         self.bpm = bpm
